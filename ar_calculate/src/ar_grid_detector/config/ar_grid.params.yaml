@@ -1,0 +1,75 @@
+/**:
+  ros__parameters:
+    odom_topic: "/aft_mapped_to_init"
+    image_topic: "/camera/camera/color/image_raw"
+    output_image_topic: "/ar_grid/image"
+    visible_cells_topic: "/ar_grid/visible_cells"
+
+    # D435 RGB通常使用针孔模型；若你改成鱼眼镜头再切回 fisheye_*
+    # camera_model: "fisheye_equidistant"
+    camera_model: "pinhole"
+    camera_json: "/home/r1/3*3_grid_ar_detection/ar_calculate/d435.json"
+
+    camera:
+      fx: 606.5
+      fy: 605.77
+      cx: 325.77
+      cy: 256.54
+      width: 640
+      height: 480
+      k1: 0.0
+      k2: 0.0
+      k3: 0.0
+      k4: 0.0
+      p1: 0.0
+      p2: 0.0
+
+    grid:
+      use_yaml: false
+      yaml_path: ""
+      # true 时直接读取旧 nine_grid_points.yaml 的 grid_points(1..9) 作为格子中心，
+      # 自动换算为三个角点，便于与旧版可视化一一对比
+      use_legacy_nine_points: false
+      legacy_nine_points_yaml: "/home/r1/Slam/ar_calculate/grid_example.yaml"
+
+      rows: 3
+      cols: 3
+
+      # 仅用于可选一致性校验；格子几何由三个角点决定（单位：米）
+      cell_width: 0.05
+      cell_height: 0.05
+      strict_size_check: false
+      size_tolerance: 0.0001
+
+      # 三个角点坐标单位：米（x, y, z）
+      # 如果 input_is_cell_centers=true，这三个坐标是格子中心位置
+      # 如果 input_is_cell_centers=false，这三个坐标是格子架的外角点位置
+      corner_top_left: [-0.081696, 0.925071, 0.370132]
+      corner_top_right: [0.128394, 0.702569, 0.372652]
+      corner_bottom_left: [-0.158594, 0.849270, 0.083796]
+
+      # 重要：用户采集的坐标通常是"站在格子中心位置"的位姿
+      # 设为 true 时会自动将格子中心坐标转换为角点坐标
+      input_is_cell_centers: true
+
+    draw:
+      cell_border_color_bgr: [255, 0, 0]
+      cell_border_thickness: 2
+      cell_center_color_bgr: [0, 0, 255]
+      cell_center_radius: 4
+      cell_center_thickness: -1
+      label_color_bgr: [0, 255, 255]
+      show_labels: true
+      show_status_text: true
+      show_window: true
+      window_name: "AR Grid Overlay"
+
+    extrinsic_rpy_xyz: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # 与 ar_overlay_node 保持一致的外参矩阵
+    # 雷达系(x前,y左,z上) -> 相机光学系(x右,y下,z前)
+    extrinsic_matrix_4x4: [
+      0.0, -1.0, 0.0, 0.0,
+      0.0, 0.0, -1.0, 0.0,
+      1.0, 0.0, 0.0, 0.0,
+      0.0, 0.0, 0.0, 1.0
+    ]

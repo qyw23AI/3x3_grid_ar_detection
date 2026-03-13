@@ -1,0 +1,123 @@
+/**:
+  ros__parameters:
+    # ==================== 180度鱼眼相机配置示例 ====================
+    # 适用镜头：K103A-M12-F2.0 (焦距3.6mm, 180°FOV, -99.57%畸变)
+    # 传感器：1/3" sensor
+    # 分辨率：1920x1080 (1080P)
+    
+    # ==================== 相机模型选择 ====================
+    # 初次使用时使用等距投影模型（最常见的180度鱼眼模型）
+    camera_model: "fisheye_equidistant"
+    # camera_model: "pinhole"
+    
+    # 标定后改用OpenCV的Kannala-Brandt模型（必须标定后才能使用）
+    # camera_model: "fisheye_kannala_brandt"
+    
+    # 可选：直接从JSON文件加载标定结果（推荐方式）
+    camera_json: ""  # 例如："/home/r1/Slam/ar_calculate/fisheye_calibration.json"
+
+    # ==================== 手动配置内参 ====================
+    camera:
+
+      
+      # ===== 内参矩阵 - 初始估算值（强烈建议OpenCV标定后更新） =====
+      # 计算依据：fx ≈ f_mm / pixel_size_mm
+      # 对于3.6mm焦距 + 1/3"传感器 + 1080P：fx ≈ 3.6 / 0.003 = 1200
+      fx: 203.7
+      fy: 203.7
+      cx: 320.0
+      cy: 240.0
+
+      width: 640
+      height: 480
+
+      # ===== 畸变参数（180度鱼眼专用） =====
+      # 初次使用时设为0，标定后必须填入正确值
+      # OpenCV标定典型范围：k1∈[-0.4, -0.1], k2∈[0.01, 0.1]
+      k1: -0.1
+      k2: 0.01
+      k3: 0.0
+      k4: 0.0
+
+      
+      # 针孔模型参数（鱼眼镜头不使用，保持0即可）
+      p1: 0.0
+      p2: 0.0
+
+    # ==================== 外参配置 ====================
+    # T_c_s: 相机坐标系 ← 传感器坐标系（雷达）变换矩阵
+    # 需要根据你的硬件安装情况进行标定
+    # 这里提供一个常用的右手坐标系示例（相机光轴=雷达Z轴）
+    extrinsic_matrix_4x4: [
+      0.0, -1.0, 0.0, 0.0,   # 相机X轴 = -雷达Y轴
+      0.0,  0.0,-1.0, 0.0,   # 相机Y轴 = -雷达Z轴
+      1.0,  0.0, 0.0, 0.0,   # 相机Z轴（光轴） = 雷达X轴
+      0.0,  0.0, 0.0, 1.0    # 齐次坐标
+    ]
+    
+    # 或使用RPY+平移表示（与matrix二选一）
+    # extrinsic_rpy_xyz: [roll, pitch, yaw, tx, ty, tz]
+    # 例如：extrinsic_rpy_xyz: [0.0, 0.0, -1.5708, 0.0, 0.0, 0.05]
+
+    # ==================== 格子架配置 ====================
+    grid:
+      # 格子架尺寸
+      rows: 3
+      cols: 3
+      cell_width: 0.05   # 格子宽度（米）
+      cell_height: 0.05  # 格子高度（米）
+      
+      # ===== 格子架三个角点坐标（世界坐标系） =====
+      # 注意：这些坐标的语义由input_is_cell_centers控制
+      # corner_top_left: [-0.532, 0.902, 0.347]      # 左上角点
+      # corner_top_right: [0.226, 0.776, 0.347]      # 右上角点
+      # corner_bottom_left: [-0.597, 0.277, 0.347]   # 左下角点
+      
+      corner_top_left: [-0.081696, 0.925071, 0.370132]
+      corner_top_right: [0.128394, 0.702569, 0.372652]
+      corner_bottom_left: [-0.158594, 0.849270, 0.083796]
+      # ===== 坐标语义控制（重要！） =====
+      # false: 上述三点表示"格子架外边框的三个角点"（默认语义）
+      # true:  上述三点表示"左上格/右上格/左下格的中心点"
+      input_is_cell_centers: false
+      
+      # 可选：严格尺寸检查（检查corner距离与cell_width/height是否一致）
+      strict_size_check: false
+
+    # ==================== ROS话题配置 ====================
+    image_topic: "/fisheye_camera/image_raw"  # 订阅的图像话题（USB鱼眼相机）
+    odom_topic: "/aft_mapped_to_init"         # 订阅的里程计话题
+    
+    # ==================== 发布配置 ====================
+    publish_image: true                       # 是否发布叠加图像
+    publish_grid_cells: true                  # 是否发布可见格子消息
+    
+    # ==================== 可视化配置 ====================
+    viz:
+      draw_grid_lines: true                   # 绘制格子边框
+      draw_grid_centers: true                 # 绘制格子中心点
+      draw_cell_ids: true                     # 绘制格子编号
+      line_thickness: 2                       # 线条粗细
+      point_radius: 5                         # 点半径
+      text_scale: 0.6                         # 文字大小
+
+# ==================== 配置说明 ====================
+# 1. 初次使用流程：
+#    - 使用本文件的估算内参（fx=1200, k1-k4=0）
+#    - 启动节点查看投影效果（允许边缘畸变）
+#    - 进行OpenCV鱼眼标定（20-30张棋盘格图像）
+#    - 将标定结果保存为JSON，填入camera_json参数
+#    - camera_model改为"fisheye_kannala_brandt"
+#
+# 2. 外参标定：
+#    - 使用hand-eye calibration工具标定T_c_s
+#    - 或使用AR标记板人工对齐方式粗略标定
+#
+# 3. 格子架坐标采集：
+#    - 使用nine_grid.py脚本采集三个角点
+#    - 注意记录采点方式（站在角点 vs 站在中心点）
+#    - 对应设置input_is_cell_centers参数
+#
+# 4. 验证方式：
+#    rqt_image_view /ar_grid/image  # 查看投影图像
+#    ros2 topic echo /ar_grid/cells  # 查看可见格子消息

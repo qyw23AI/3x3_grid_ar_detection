@@ -1,0 +1,152 @@
+/**:
+  ros__parameters:
+    # ========== 重定位开关与先验地图 ==========
+    # true: 启用在先验地图中的定位模式（需要 prior_map_path 可读）
+    # false: 纯建图/里程计模式
+    # 注意：重定位模式有bug，会导致FAST-LIVO在等待初始位姿时拒绝所有传感器数据，
+    # 导致内部状态未初始化而崩溃。建议使用false（纯SLAM模式）
+    locate_in_prior_map: false
+    # 先验地图 pcd 保存路径
+    prior_map_path: "/home/r1/3*3_grid_ar_detection/FAST_LIVO2_ROS2_relocation_ultra/src/FAST-LIVO2/Log/relocation/all_raw_points.pcd"
+    
+    common:
+      # 相机图像输入话题（建议与实际驱动输出一致）
+      img_topic: "/camera/camera/color/image_raw"
+      # image_topic: "/fisheye_camera/image_raw"
+      # 雷达点云输入话题（Livox 驱动）
+      lid_topic: "/livox/lidar"
+      # IMU 输入话题（Livox 驱动）
+      imu_topic: "/livox/imu"
+      # 图像前端开关：1 开启视觉，0 关闭视觉（仅激光+IMU）
+      img_en: 0
+      # 激光前端开关：通常保持 1
+      lidar_en: 1
+      # 某些 ROS 驱动时间戳兼容开关，默认 false
+      ros_driver_bug_fix: false
+
+    camera:
+      # 相机模型，当前工程使用针孔模型
+      model: Pinhole
+      # 输入图像分辨率，必须与相机驱动输出一致
+      width: 640
+      height: 480
+      # 图像缩放系数：1.0 表示不缩放
+      scale: 1.0
+      # 相机内参（焦距+主点）
+      fx: 606.50
+      fy: 605.77
+      cx: 325.77
+      cy: 256.54
+      # 畸变参数（若已去畸变或未知可置 0）
+      d0: 0.0
+      d1: 0.0
+      d2: 0.0
+      d3: 0.0
+
+    extrin_calib:
+      # 雷达到 IMU 的平移外参（单位 m）
+      extrinsic_T: [0.011, 0.02329, -0.04412]
+      # 雷达到 IMU 的旋转外参（3x3 按行展开）
+      extrinsic_R: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+      # 相机-雷达外参旋转（工程标定值）
+      Rcl: [0.0453694, -0.998764, -0.020299,
+            0.0390085,  0.0220757, -0.998995,
+            0.998208,   0.044532,   0.0399619]
+      # 相机-雷达外参平移（工程标定值，单位 m）
+      Pcl: [-0.110736, -0.118778, -0.106997]
+
+    time_offset:
+      # IMU 时间偏移补偿（s）
+      imu_time_offset: 0.0
+      # 图像时间偏移补偿（s）
+      img_time_offset: 0.1
+      # 初始曝光时间估计（s）
+      exposure_time_init: 0.0
+
+    preprocess:
+      # 点云抽样步长，越大越省算力但细节更少
+      point_filter_num: 1
+      # 面点滤波体素大小（m）
+      filter_size_surf: 0.1
+      # 雷达类型：1 对应 Livox Avia/MID360 流程
+      lidar_type: 1 # Livox Avia LiDAR
+      # 扫描线数（Livox 可保持默认）
+      scan_line: 4
+      # 盲区半径（m），近距离点会被忽略
+      blind: 0.5
+
+    vio:
+      # 视觉优化最大迭代次数
+      max_iterations: 5
+      # 视觉外点阈值（大=更宽松）
+      outlier_threshold: 1000 # 78 100 156 #100 200 500 700 infinite
+      # 图像点协方差（大=更不相信视觉）
+      img_point_cov: 100 # 100 1000
+      # 图像 patch 大小与金字塔层数
+      patch_size: 8
+      patch_pyrimid_level: 4
+      # 法向约束与光线投射开关
+      normal_en: true
+      raycast_en: false
+      inverse_composition_en: false
+      # 曝光估计开关与先验
+      exposure_estimate_en: true
+      inv_expo_cov: 0.1
+
+    imu:
+      # IMU 融合总开关
+      imu_en: true
+      # IMU 累积帧数
+      imu_int_frame: 30
+      # 噪声与零偏随机游走协方差
+      acc_cov: 0.8 # 0.2
+      gyr_cov: 0.5 # 0.5
+      b_acc_cov: 0.001 # 0.1
+      b_gyr_cov: 0.001 # 0.1
+
+    lio:
+      # 激光优化最大迭代次数
+      max_iterations: 5
+      # 点到面/束误差阈值
+      dept_err: 0.02
+      beam_err: 0.15
+      # 特征退化判断阈值
+      min_eigen_value: 0.005 # 0.005
+      # 地图体素与分层参数（影响精度与速度）
+      voxel_size: 0.5
+      max_layer: 2
+      max_points_num: 50
+      layer_init_num: [5, 5, 5, 5, 5]
+
+    local_map:
+      # 局部地图滑窗开关与尺寸
+      map_sliding_en: false
+      half_map_size: 100
+      sliding_thresh: 8.0
+
+    uav:
+      # 姿态/重力对齐相关开关
+      imu_rate_odom: false
+      gravity_align_en: true
+
+    publish:
+      # 发布控制：稠密地图/有效点/平面/抽帧
+      dense_map_en: true
+      pub_effect_point_en: false
+      pub_plane_en: false
+      pub_scan_num: 1
+      blind_rgb_points: 0.0
+
+    evo:
+      # 实验序列名与位姿输出开关
+      seq_name: "CBD_Building_01"
+      pose_output_en: false
+
+    pcd_save:
+      # 点云保存开关与参数（interval=-1 表示结束时保存）
+      pcd_save_en: true
+      colmap_output_en: false # need to set interval = -1
+      filter_size_pcd: 0.15
+      interval: -1
+
+    

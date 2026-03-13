@@ -1,0 +1,51 @@
+ar_overlay_node:
+  ros__parameters:
+    # 九宫格世界坐标文件（由 nine_grid.py 生成）
+    grid_yaml: /home/r1/Slam/ar_calculate/nine_grid_points.yaml
+    # 相机内参文件（建议使用当前真实相机标定）
+    camera_json: /home/r1/Slam/ar_calculate/d435.json
+
+    # 里程计输入（来自 FAST-LIVO2）
+    odom_topic: /aft_mapped_to_init
+    # 图像输入（来自当前相机驱动）
+    image_topic: /camera/camera/color/image_raw
+    # AR 叠加图像输出
+    output_image_topic: /ar_overlay/image
+
+    # ========== 绘制样式 ==========
+    # 点半径（像素）                    
+    draw_radius: 6
+    # 点线宽，-1 表示实心圆
+    draw_thickness: -1
+    # 点颜色 BGR
+    point_color_bgr: [0, 0, 255]
+    # 是否显示 1~9 编号文字
+    show_labels: true
+    # 是否绘制九宫格连线
+    draw_grid_lines: true
+    # 线颜色 BGR
+    line_color_bgr: [255, 0, 0]
+    # 线宽（像素）
+    line_thickness: 2
+    # 是否显示状态文本（可见点数/odom状态）
+    show_status_text: true
+    # 是否弹出 OpenCV 本地窗口（无显示器环境建议 false）
+    show_window: false
+    # 本地窗口标题
+    window_name: AR Overlay
+
+    # ========== 外参配置（2选1） ==========
+    # 方式1：roll/pitch/yaw + xyz（单位: rad, m）
+    # 仅当 extrinsic_matrix_4x4 为空 [] 时生效
+    extrinsic_rpy_xyz: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    # 方式2：4x4矩阵（按行展开16个数）
+    # 非空时优先使用该参数；若保持[]，则使用上面的 extrinsic_rpy_xyz
+    # 这里给出常见“雷达系(x前,y左,z上) -> 相机光学系(x右,y下,z前)”旋转，平移为0
+    # x_cam = -y_lidar, y_cam = -z_lidar, z_cam = x_lidar
+    extrinsic_matrix_4x4: [
+      0.0, -1.0, 0.0, 0.0,
+      0.0, 0.0, -1.0, 0.0,
+      1.0, 0.0, 0.0, 0.0,
+      0.0, 0.0, 0.0, 1.0
+    ]

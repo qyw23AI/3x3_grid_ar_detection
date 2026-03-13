@@ -1,0 +1,211 @@
+# 180度USB鱼眼相机参数配置示例
+# K103A-M12-F2.0 规格书
+# 用于 ar_grid_detector
+
+# 相机模型选择
+# 对于180度鱼眼相机，推荐使用 fisheye_equidistant (等距投影)
+camera_model: "fisheye_equidistant"
+
+# ============= 方式1：直接加载JSON文件 (推荐) =============
+# 如果已通过 fisheye_calibration_tool.py 进行了标定
+# 使用以下配置将自动加载内参和畸变参数
+# camera_json: "/path/to/fisheye_params.json"
+
+# ============= 方式2：手动填写参数 =============
+# 从标定工具的输出或规格书中获取以下参数
+
+camera:
+  # === 分辨率 ===
+  # K103A支持 1080P 和 720P
+  # 推荐使用 1920x1080 以获得最佳AR定位精度
+  width: 1920
+  height: 1080
+  
+  # === 内参矩阵参数 ===
+  # fx, fy: 焦距(像素单位)，通过标定获得
+  # cx, cy: 主点(光轴中心)
+  # 
+  # 对于标准的 usb_cam + K103A 组合，典型值为：
+  # 注意：这些值需要根据实际标定结果调整！
+  # 
+  fx: 650.5          # 水平焦距(像素)
+  fy: 650.3          # 竖直焦距(像素)
+  cx: 960.0          # 主点x坐标(通常为宽度/2)
+  cy: 540.0          # 主点y坐标(通常为高度/2)
+  
+  # === 鱼眼畸变参数 ===
+  # 用于等距投影模型: r = f * theta
+  # 这些参数通过OpenCV鱼眼标定获得
+  # k1, k2, k3, k4: 四个畸变系数
+  #
+  # 典型的K103A (180度鱼眼)标定结果：
+  # 注意：这些值需要根据实际标定结果调整！
+  #
+  k1:  -0.234        # 一阶径向畸变(通常为负)
+  k2:   0.067        # 二阶径向畸变
+  k3:  -0.012        # 三阶径向畸变
+  k4:   0.002        # 四阶径向畸变
+
+# ======================== 格子架参数 ========================
+# 定义AR定位格子的物理位置和尺寸
+
+grid:
+  # === 格子矩阵尺寸 ===
+  rows: 2            # 行数
+  cols: 2            # 列数
+  
+  # === 格子尺寸 ===
+  # 两种语义可选：
+  # 1. 边角点语义(input_is_cell_centers=false): 
+  #    指定的坐标是格子架外边界的角点
+  #    cell_width = 单个格子的宽度
+  #    cell_height = 单个格子的高度
+  #
+  # 2. 格子中心语义(input_is_cell_centers=true): 
+  #    指定的坐标是各格子的中心位置
+  #    会自动转换为边角点坐标
+  #
+  cell_width: 0.075   # 单个格子宽度(米)
+  cell_height: 0.075  # 单个格子高度(米)
+  
+  # === 格子位置 (世界坐标系) ===
+  # 三个参考点定义整个格子架，采用右手系
+  # 
+  # 当 input_is_cell_centers=false (边角点语义)：
+  #   corner_top_left: 格子架左上角外侧点
+  #   corner_top_right: 格子架右上角外侧点
+  #   corner_bottom_left: 格子架左下角外侧点
+  # 
+  # 当 input_is_cell_centers=true (格子中心语义)：
+  #   corner_top_left: 左上角格子的中心
+  #   corner_top_right: 右上角格子的中心
+  #   corner_bottom_left: 左下角格子的中心
+  #
+  corner_top_left: [-0.081696, 0.925071, 0.370132]    # [x, y, z] 单位: 米
+  corner_top_right: [0.128394, 0.702569, 0.372652]
+  corner_bottom_left: [-0.158594, 0.849270, 0.083796]
+  
+  # === 坐标语义标志 ===
+  # 设置为 true: 上述点是格子中心位置（从现场测量获得）
+  # 设置为 false: 上述点是格子边界角点（物理框架边界）
+  input_is_cell_centers: true
+
+# =================== 外参 (相机-雷达变换) ===================
+# 从相机光学坐标系到激光雷达坐标系的变换矩阵
+# T_c_s (Camera 到 Sensor): 4x4 齐次变换矩阵
+#
+# 该矩阵将激光雷达点云中的点P_s变换到相机坐标系：
+#   P_c = T_c_s * P_s
+#
+# 对于K103A USB摄像头通常采用俯视安装，
+# 矩阵值度说明：旋转部分表示 [x'方向, y'方向, z'方向] 在原坐标系中的方向，
+# 平移部分是相机相对于雷达的位置(米)
+#
+# 该矩阵需要通过以下方法之一获得：
+# 1. 手标定法：放置棋盘格，测量相机-雷达相对位置
+# 2. 自动标定法：使用 calibrate_extrinsic.py 脚本
+#
+extrinsic_matrix_4x4: [
+  0.0,  -1.0,   0.0,   0.0,
+  0.0,   0.0,  -1.0,   0.0,
+  1.0,   0.0,   0.0,   0.0,
+  0.0,   0.0,   0.0,   1.0
+]
+
+# ======================== 话题配置 ========================
+# ROS2 通信主题配置
+
+subscribers:
+  # 里程计话题 (包含传感器位姿 T_w_s)
+  # 格式：geometry_msgs/TransformStamped
+  odom_topic: "/aft_mapped_to_init"
+  
+  # 相机图像话题 (标准sensor_msgs/Image格式)
+  # 对于USB摄像头应为 "/camera/image_raw" 或 "/fisheye_camera/image_raw"
+  image_topic: "/fisheye_camera/image_raw"
+
+publishers:
+  # 输出的可视化图像话题 (带格子叠加)
+  output_image_topic: "/ar_grid/image"
+  
+  # 输出的格子检测结果话题 (GridCellArray消息)
+  grid_detection_topic: "/ar_grid/visible_cells"
+
+# ======================== 可视化参数 ========================
+
+visualization:
+  # 是否在输出图像上绘制格子边框
+  draw_grid_border: true
+  
+  # 边框线宽 (像素)
+  border_width: 2
+  
+  # 边框颜色 (BGR 格式，0-255)
+  border_color: [0, 255, 0]  # 绿色
+  
+  # 显示格子ID
+  show_cell_id: true
+  
+  # ID字体大小
+  font_size: 0.6
+
+# ======================== 调试参数 ========================
+
+debug:
+  # 是否输出详细日志
+  verbose: true
+  
+  # 是否保存处理后的中间结果
+  save_debug_images: false
+  
+  # 调试图像保存路径
+  debug_output_dir: "/tmp/ar_grid_debug"
+  
+  # 是否绘制已投影的格子中心点
+  draw_projected_centers: true
+
+# ======================== 故障排除参考 ========================
+#
+# 问题1：格子整体偏移10-20cm
+# → 原因：input_is_cell_centers 参数与实际采点方式不匹配
+# → 解决：
+#    - 如果测得的是各格子的中心位置 → 设为 true
+#    - 如果测得的是格子架外边界角点 → 设为 false
+#
+# 问题2：边缘格子严重形变或不可见
+# → 原因1：鱼眼相机模型选择错误
+# → 解决1：尝试 "fisheye_kannala_brandt" 或 "fisheye_stereographic"
+# → 原因2：外参 T_c_s 不正确
+# → 解决2：重新标定相机-雷达外参
+#
+# 问题3：畸变参数填写不正确
+# → 原因：k1-k4 参数未标定或填错
+# → 解决：运行 scripts/fisheye_calibration_tool.py 获取正确参数
+#         或加载已标定的 JSON 文件
+#
+# 问题4：图像输入话题无法连接
+# → 原因：USB相机驱动未启动或话题名称错误
+# → 解决：
+#    1. 检查 start_all.sh 中 USB_CAMERA_LAUNCH_CMD 配置
+#    2. 运行 ros2 topic list | grep image 检查可用话题
+#    3. 修改 image_topic 参数匹配实际话题名
+
+# ======================== 使用说明 ========================
+#
+# 1. 首次使用需要进行相机标定：
+#    python3 src/ar_grid_detector/scripts/fisheye_calibration_tool.py \
+#      --images "calibration_images/*.jpg" \
+#      --output fisheye_params.json
+#
+# 2. 将标定得到的参数填入上方的 camera 段落
+#    或使用 camera_json 直接加载 JSON 文件
+#
+# 3. 修改 grid 段落中的格子位置信息（根据实际部署）
+#
+# 4. 编译并启动：
+#    colcon build --packages-select ar_grid_detector
+#    ros2 launch ar_grid_detector ar_grid.launch.py
+#
+# 5. 验证输出：
+#    rqt_image_view /ar_grid/image
+#    ros2 topic echo /ar_grid/visible_cells

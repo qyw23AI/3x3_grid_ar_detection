@@ -1,0 +1,36 @@
+{
+  "camera_matrix": {
+    "data": [
+      [
+        606.50,
+        0.0,
+        325.77
+      ],
+      [
+        0.0,
+        605.77,
+        256.54
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "fx": 606.50,
+    "fy": 605.77,
+    "cx": 325.77,
+    "cy": 256.54
+  },
+  "image_size": {
+    "width": 640,
+    "height": 480
+  },
+  "calibration_info": {
+    "note": "Manually adjusted to engineering golden values for R2 docking",
+    "num_images": 80,
+    "chessboard_size": [9, 9],
+    "square_size_mm": 20.0,
+    "rms_error": 0.9252596361311792
+  }
+}

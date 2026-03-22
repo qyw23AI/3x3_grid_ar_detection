@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-雷达位姿录制工具（固定 1-3-7 采点）
+雷达位姿录制工具（可变点数采点）
 
 功能：
 1. 订阅 /aft_mapped_in_map（Odometry）
-2. 按 1 -> 3 -> 7 顺序采点
+2. 按用户指定顺序采集任意数量的点
 3. 每个点都要求终端确认后才开始采样
 4. 每个点采样 n 次（可调），并执行异常值剔除后求均值
 5. 输出 JSON 文件
@@ -52,7 +52,7 @@ class LidarPoseRecorder(Node):
         self.recorded_poses: Dict[int, List[float]] = {}
 
         self.get_logger().info("=" * 60)
-        self.get_logger().info("   雷达位姿录制工具（固定顺序 1-3-7）")
+        self.get_logger().info("   雷达位姿录制工具（可变点数采点）")
         self.get_logger().info("=" * 60)
         self.get_logger().info(f"订阅话题: {self.topic_name}")
         self.get_logger().info("")
@@ -176,15 +176,18 @@ class LidarPoseRecorder(Node):
         output_file: Optional[str] = None,
     ) -> Optional[str]:
         """生成并保存 JSON 配置。"""
-        required_points = [1, 3, 7]
-        missing = [p for p in required_points if p not in self.recorded_poses]
-        if missing:
-            self.get_logger().error(f"❌ 缺少点 {missing}，无法生成配置文件")
+        # 不再强制要求特定点，而是使用所有记录的点
+        if not self.recorded_poses:
+            self.get_logger().error("❌ 没有记录任何点，无法生成配置文件")
             return None
 
-        points_dict = {f'p{p}': self.recorded_poses[p] for p in required_points}
+        # 按照点ID顺序生成点字典
+        sorted_points = sorted(self.recorded_poses.keys())
+        points_dict = {f'p{p}': self.recorded_poses[p] for p in sorted_points}
+        
         config = {
-            "point_mode": "1-3-7",
+            "point_mode": "custom",
+            "total_points": len(sorted_points),
             "topic": self.topic_name,
             "sampling": {
                 "samples": int(sample_count),
@@ -200,7 +203,7 @@ class LidarPoseRecorder(Node):
 
         if output_file is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_file = f"nine_grid_calibration_137_{timestamp}.json"
+            output_file = f"grid_calibration_{timestamp}.json"
 
         output_path = Path(output_file)
 
@@ -232,7 +235,7 @@ def _wait_pose_ready(recorder: LidarPoseRecorder, wait_sec: float) -> bool:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="固定 1-3-7 顺序的雷达位姿采点工具")
+    parser = argparse.ArgumentParser(description="可变点数的雷达位姿采点工具")
     parser.add_argument("--topic", default="/aft_mapped_in_map", help="位姿订阅话题（例如 Odometry）")
     parser.add_argument("--samples", type=int, default=6, help="每个点采样次数 n")
     parser.add_argument("--interval", type=float, default=0.08, help="采样间隔（秒）")
@@ -270,58 +273,47 @@ def main():
             print("\n❌ 无法接收位姿消息，请检查话题与 SLAM 发布状态")
             return
 
-        ordered_points = [1, 3, 7]
+        recorded_points = []
         per_point_stats: Dict[int, Dict[str, object]] = {}
+        point_counter = 1
 
-        print("\n将按固定顺序采点: 1 -> 3 -> 7")
+        print("\n开始采集点位姿，您可以采集任意数量的点")
         print(f"每点采样次数: {args.samples}, 采样间隔: {args.interval:.3f}s, 异常阈值: {args.outlier_z}")
 
-        for idx, point_id in enumerate(ordered_points, start=1):
+        while True:
             print("\n" + "=" * 60)
-            print(f"[{idx}/3] 请将雷达移动到点 {point_id} 位置")
-            recorder.print_current_pose()
+            print(f"请将雷达移动到点 {point_counter} 位置")
+            
 
-            while True:
-                if not _ask_confirm(f"确认开始采集点 {point_id} ? (y/n): "):
-                    if _ask_confirm("放弃本次采集并退出? (y/n): "):
-                        print("已取消采集")
-                        return
-                    recorder.print_current_pose()
-                    continue
-                break
+            if not _ask_confirm(f"确认开始采集点 {point_counter} ? (y/n): "):
+                if _ask_confirm("放弃本次采集并退出? (y/n): "):
+                    print("已取消采集")
+                    return
+                recorder.print_current_pose()
+                continue
 
             ok, averaged_xyz, stats = recorder.collect_point_average(
-                point_id=point_id,
+                point_id=point_counter,
                 sample_count=int(args.samples),
                 sample_interval_sec=float(args.interval),
                 outlier_z_thresh=float(args.outlier_z),
             )
             if not ok or averaged_xyz is None:
-                print(f"❌ 点 {point_id} 采样失败：{stats}")
+                print(f"❌ 点 {point_counter} 采样失败：{stats}")
                 return
 
-            per_point_stats[point_id] = stats
+            per_point_stats[point_counter] = stats
             print(
-                f"✓ 点 {point_id} 完成: avg=[{averaged_xyz[0]:.6f}, {averaged_xyz[1]:.6f}, {averaged_xyz[2]:.6f}] "
+                f"✓ 点 {point_counter} 完成: avg=[{averaged_xyz[0]:.6f}, {averaged_xyz[1]:.6f}, {averaged_xyz[2]:.6f}] "
                 f"(raw={stats['raw_count']}, kept={stats['kept_count']}, rejected={stats['rejected_count']})"
             )
 
-            if not _ask_confirm(f"确认接受点 {point_id} 的采样结果? (y/n): "):
-                print(f"将重新采集点 {point_id}")
-                ok, averaged_xyz, stats = recorder.collect_point_average(
-                    point_id=point_id,
-                    sample_count=int(args.samples),
-                    sample_interval_sec=float(args.interval),
-                    outlier_z_thresh=float(args.outlier_z),
-                )
-                if not ok or averaged_xyz is None:
-                    print(f"❌ 点 {point_id} 重采样失败：{stats}")
-                    return
-                per_point_stats[point_id] = stats
-                print(
-                    f"✓ 点 {point_id} 重采完成: avg=[{averaged_xyz[0]:.6f}, {averaged_xyz[1]:.6f}, {averaged_xyz[2]:.6f}] "
-                    f"(raw={stats['raw_count']}, kept={stats['kept_count']}, rejected={stats['rejected_count']})"
-                )
+            # 询问是否采集下一个点
+            if not _ask_confirm("是否采集下一个点? (y/n): "):
+                print("结束采集")
+                break
+
+            point_counter += 1
 
         output_file = args.output.strip() if args.output else None
         saved = recorder.generate_json_config(

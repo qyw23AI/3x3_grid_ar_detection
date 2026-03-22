@@ -1,276 +1,343 @@
 #!/usr/bin/env python3
 """
-雷达位姿录制工具
-用于通过 SLAM 实时标定九宫格关键点位置
+雷达位姿录制工具（固定 1-3-7 采点）
 
-使用方法:
-1. 启动 SLAM 系统: ./start_all_with_offset.sh
-2. 运行此脚本: python3 record_lidar_poses.py
-3. 按照提示将雷达移动到九宫格关键点位置
-4. 根据选择的点位模式，记录该模式需要的所有关键点
-5. 脚本自动生成 JSON 配置文件
+功能：
+1. 订阅 /aft_mapped_in_map（Odometry）
+2. 按 1 -> 3 -> 7 顺序采点
+3. 每个点都要求终端确认后才开始采样
+4. 每个点采样 n 次（可调），并执行异常值剔除后求均值
+5. 输出 JSON 文件
+
+示例：
+  python3 record_lidar_poses.py --samples 6 --interval 0.08
 """
 
-import rclpy
-from rclpy.node import Node
-from rclpy.executors import SingleThreadedExecutor
-from geometry_msgs.msg import PoseStamped
+import argparse
 import json
-from pathlib import Path
-from datetime import datetime
-from typing import Optional
 import threading
 import time
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, TypedDict
+
+import numpy as np
+import rclpy
+from rclpy.executors import SingleThreadedExecutor
+from nav_msgs.msg import Odometry
+from rclpy.node import Node
+
+
+class PoseData(TypedDict):
+    position: List[float]
+    quaternion: List[float]
+    frame_id: str
+    timestamp: float
 
 
 class LidarPoseRecorder(Node):
-    def __init__(self):
+    def __init__(self, topic_name: str = "/aft_mapped_in_map"):
         super().__init__('lidar_pose_recorder')
-        
-        # 订阅里程计话题
-        self.subscription = self.create_subscription(
-            PoseStamped,
-            '/aft_mapped_to_init',
-            self.pose_callback,
-            10
+
+        # 仅订阅 Odometry 类型的位姿消息
+        self.odom_subscription = self.create_subscription(
+            Odometry,
+            topic_name,
+            self.odom_callback,
+            10,
         )
-        
-        self.current_pose = None
-        self.recorded_poses = {}
-        self.grid_points = {1, 2, 3, 4, 5, 6, 7, 8, 9}
-        
+        self.get_logger().info("已使用 Odometry 创建订阅")
+        self.topic_name = topic_name
+        self.current_pose: Optional[PoseData] = None
+        self.recorded_poses: Dict[int, List[float]] = {}
+
         self.get_logger().info("=" * 60)
-        self.get_logger().info("         雷达位姿录制工具")
+        self.get_logger().info("   雷达位姿录制工具（固定顺序 1-3-7）")
         self.get_logger().info("=" * 60)
-        self.get_logger().info("订阅话题: /aft_mapped_to_init")
+        self.get_logger().info(f"订阅话题: {self.topic_name}")
         self.get_logger().info("")
-        
-    def pose_callback(self, msg: PoseStamped):
-        """接收位姿更新"""
-        # 提取平移和旋转
-        pos = msg.pose.position
+
+    # 已移除 PoseStamped 回调，当前仅使用 Odometry 回调（`odom_callback`）
+
+    def odom_callback(self, msg: Odometry):
+        """接收 Odometry 消息并提取位姿（兼容性处理）。"""
+        p = msg.pose.pose.position
+        q = msg.pose.pose.orientation
         self.current_pose = {
-            'position': [pos.x, pos.y, pos.z],
-            'quaternion': [
-                msg.pose.orientation.x,
-                msg.pose.orientation.y,
-                msg.pose.orientation.z,
-                msg.pose.orientation.w
-            ],
+            'position': [p.x, p.y, p.z],
+            'quaternion': [q.x, q.y, q.z, q.w],
             'frame_id': msg.header.frame_id,
-            'timestamp': msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
+            'timestamp': msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9,
         }
-        
-    def get_current_pose(self):
-        """获取当前位姿"""
+
+    def get_current_pose(self) -> Optional[PoseData]:
+        """获取当前位姿。"""
         if self.current_pose is None:
-            self.get_logger().warn("⚠️  还未收到位姿信息，请确保 SLAM 系统正常运行")
+            self.get_logger().warn("⚠️  还未收到位姿信息，请确保 SLAM 正常发布 Odometry")
             return None
         return self.current_pose
-    
+
     def print_current_pose(self):
-        """打印当前位姿"""
+        """打印当前位姿。"""
         pose = self.get_current_pose()
         if pose:
             pos = pose['position']
             self.get_logger().info(f"当前位置: X={pos[0]:7.4f}  Y={pos[1]:7.4f}  Z={pos[2]:7.4f}")
-    
-    def record_point(self, point_id: int):
-        """记录一个点的位姿"""
-        pose = self.get_current_pose()
-        if pose is None:
-            return False
-        
-        self.recorded_poses[point_id] = pose['position']
-        self.get_logger().info(f"✓ 已记录点 {point_id}: {pose['position']}")
-        return True
-    
+
+    @staticmethod
+    def _reject_outliers_mad(samples: np.ndarray, z_thresh: float = 2.5) -> np.ndarray:
+        """基于 MAD 的鲁棒异常值剔除。"""
+        # 样本太少时，MAD 和鲁棒统计都不稳定，直接返回原始数据。
+        if samples.shape[0] < 4:
+            return samples
+
+        # 先按“每一列一个维度”的方式求中位数，得到一个鲁棒中心点。
+        med = np.median(samples, axis=0)
+        # 计算每个样本到中位数中心的欧氏距离，作为离群程度的基础。
+        dist = np.linalg.norm(samples - med, axis=1)
+        # 计算距离序列的 MAD（Median Absolute Deviation），衡量“距离值”本身的离散程度。
+        mad = np.median(np.abs(dist - np.median(dist)))
+
+        # 如果 MAD 接近 0，说明样本非常集中，无法再可靠地区分异常值。
+        if mad < 1e-12:
+            return samples
+
+        # 将距离转换为鲁棒 z 分数：数值越大，越可能是异常点。
+        robust_z = 0.6745 * (dist - np.median(dist)) / mad
+        # 保留鲁棒 z 分数绝对值不超过阈值的样本。
+        keep_mask = np.abs(robust_z) <= z_thresh
+        # 根据掩码过滤掉异常样本。
+        filtered = samples[keep_mask]
+
+        # 如果过滤后样本过少，说明剔除过于激进；此时宁可保留原始样本。
+        if filtered.shape[0] < max(3, samples.shape[0] // 2):
+            return samples
+        # 返回过滤后的鲁棒样本集合。
+        return filtered
+
+    def collect_point_average(
+        self,
+        point_id: int,
+        sample_count: int,
+        sample_interval_sec: float,
+        outlier_z_thresh: float,
+    ) -> Tuple[bool, Optional[List[float]], Dict[str, object]]:
+        """采集单个点的 n 次样本，做异常值剔除并返回均值。"""
+        # 用于保存当前点的原始采样序列，每个元素都是 [x, y, z]。
+        raw_samples: List[List[float]] = []
+
+        # 循环采样 sample_count 次，每次采样都读取当前最新位姿。
+        for _ in range(sample_count):
+            # 获取当前订阅到的最新位姿。
+            pose = self.get_current_pose()
+            if pose is None:
+                # 如果没有位姿，直接返回失败，并说明已经采了多少次。
+                return False, None, {
+                    "reason": "no_pose",
+                    "raw_count": len(raw_samples),
+                    "kept_count": 0,
+                }
+            # 只保存位姿中的位置部分，不把四元数用于均值计算。
+            raw_samples.append([float(v) for v in pose['position']])
+            # 等待一段时间后再采下一次，形成多次独立采样。
+            time.sleep(sample_interval_sec)
+
+        # 将 Python 列表转换为 NumPy 数组，方便后续做统计计算。
+        raw_np = np.asarray(raw_samples, dtype=np.float64)
+        # 调用 MAD 方法剔除异常值，得到更稳定的有效样本集。
+        filtered_np = self._reject_outliers_mad(raw_np, z_thresh=outlier_z_thresh)
+        # 对过滤后的样本求均值，作为该点最终代表位姿。
+        mean_xyz = filtered_np.mean(axis=0)
+
+        # 将结果转回普通 Python 列表，便于 JSON 序列化。
+        result = [float(mean_xyz[0]), float(mean_xyz[1]), float(mean_xyz[2])]
+        # 保存该点最终结果，供后续 JSON 输出使用。
+        self.recorded_poses[point_id] = result
+
+        # 记录采样统计信息，便于检查剔除效果和数据稳定性。
+        stats = {
+            "raw_count": int(raw_np.shape[0]),
+            "kept_count": int(filtered_np.shape[0]),
+            "rejected_count": int(raw_np.shape[0] - filtered_np.shape[0]),
+            # 原始样本在三个坐标轴上的标准差，反映抖动程度。
+            "raw_std_xyz": [float(v) for v in raw_np.std(axis=0)],
+            # 剔除异常值后样本的标准差，通常应更小，更能代表稳定结果。
+            "kept_std_xyz": [float(v) for v in filtered_np.std(axis=0)],
+        }
+        # 返回成功标志、最终均值、以及统计信息。
+        return True, result, stats
+
     def generate_json_config(
         self,
-        point_mode: str,
-        grid_size: float,
-        size_mode: str = "cell",
+        sample_count: int,
+        sample_interval_sec: float,
+        outlier_z_thresh: float,
+        per_point_stats: Dict[int, Dict[str, object]],
         output_file: Optional[str] = None,
-    ):
-        """
-        生成 JSON 配置文件
-        
-        Args:
-            point_mode: "1-3-7" 或 "3-9-7"
-            grid_size: 网格大小（米）
-            size_mode: "cell" 或 "total"
-            output_file: 输出文件路径
-        """
-        if point_mode not in ["1-3-7", "3-9-7"]:
-            self.get_logger().error(f"❌ point_mode 必须是 '1-3-7' 或 '3-9-7'")
-            return False
-        
-        # 确定需要的点
-        if point_mode == "1-3-7":
-            required_points = [1, 3, 7]
-        else:  # "3-9-7"
-            required_points = [3, 9, 7]
-        
-        # 检查是否都已记录
+    ) -> Optional[str]:
+        """生成并保存 JSON 配置。"""
+        required_points = [1, 3, 7]
         missing = [p for p in required_points if p not in self.recorded_poses]
         if missing:
-            self.get_logger().error(f"❌ 缺少点 {missing}，无法生成配置")
-            return False
-        
-        # 生成 JSON 数据
-        points_dict = {}
-        for p in required_points:
-            points_dict[f'p{p}'] = self.recorded_poses[p]
-        
+            self.get_logger().error(f"❌ 缺少点 {missing}，无法生成配置文件")
+            return None
+
+        points_dict = {f'p{p}': self.recorded_poses[p] for p in required_points}
         config = {
-            "point_mode": point_mode,
-            "size_mode": size_mode,
-            "grid_size": grid_size,
+            "point_mode": "1-3-7",
+            "topic": self.topic_name,
+            "sampling": {
+                "samples": int(sample_count),
+                "interval_sec": float(sample_interval_sec),
+                "outlier_z_thresh": float(outlier_z_thresh),
+            },
             "points": points_dict,
             "recorded_at": datetime.now().isoformat(),
-            "all_recorded_points": {
-                f'p{k}': v for k, v in self.recorded_poses.items()
+            "per_point_stats": {
+                f"p{k}": v for k, v in per_point_stats.items()
             }
         }
-        
-        # 确定输出文件
+
         if output_file is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_file = f"nine_grid_calibration_{timestamp}.json"
-        
+            output_file = f"nine_grid_calibration_137_{timestamp}.json"
+
         output_path = Path(output_file)
-        
-        # 写入 JSON 文件
+
         try:
-            with open(output_path, 'w') as f:
+            with open(output_path, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=2)
             self.get_logger().info(f"✓ 配置文件已生成: {output_path.absolute()}")
             return str(output_path.absolute())
         except Exception as e:
             self.get_logger().error(f"❌ 写入配置文件失败: {e}")
-            return False
-    
-    def print_recorded_points(self):
-        """打印已记录的所有点"""
-        if not self.recorded_poses:
-            self.get_logger().warn("⚠️  还未记录任何点")
-            return
-        
-        self.get_logger().info("\n" + "=" * 60)
-        self.get_logger().info("           已记录的点位")
-        self.get_logger().info("=" * 60)
-        for point_id in sorted(self.recorded_poses.keys()):
-            pos = self.recorded_poses[point_id]
-            self.get_logger().info(
-                f"点 {point_id}: X={pos[0]:7.4f}  Y={pos[1]:7.4f}  Z={pos[2]:7.4f}"
-            )
+            return None
 
 
-def interactive_mode(recorder: LidarPoseRecorder):
-    """交互模式"""
-    while True:
-        print("\n" + "=" * 60)
-        print("          选择操作")
-        print("=" * 60)
-        print("1. 查看当前位姿")
-        print("2. 记录点位 (输入点号 1-9)")
-        print("3. 查看已记录点位")
-        print("4. 生成配置文件")
-        print("5. 退出")
-        
-        choice = input("\n请输入选项 (1-5): ").strip()
-        
-        if choice == "1":
-            recorder.print_current_pose()
-        
-        elif choice == "2":
-            try:
-                point_id = int(input("输入点号 (1-9): "))
-                if 1 <= point_id <= 9:
-                    recorder.print_current_pose()
-                    confirm = input(f"确认记录点 {point_id}? (y/n): ").strip().lower()
-                    if confirm == 'y':
-                        recorder.record_point(point_id)
-                else:
-                    print("❌ 点号范围应在 1-9 之间")
-            except ValueError:
-                print("❌ 输入格式错误")
-        
-        elif choice == "3":
-            recorder.print_recorded_points()
-        
-        elif choice == "4":
-            print("\n选择点位模式:")
-            print("  1: 使用 1-3-7 (左上、右上、左下)")
-            print("  2: 使用 3-9-7 (右上、右下、左下)")
-            mode_choice = input("请输入 (1 或 2): ").strip()
-            
-            if mode_choice == "1":
-                point_mode = "1-3-7"
-            elif mode_choice == "2":
-                point_mode = "3-9-7"
-            else:
-                print("❌ 输入无效")
-                continue
-            
-            try:
-                grid_size = float(input(f"输入网格大小 (保持 cell 模式，单位米): "))
-                output_file = input("输入输出文件名 (默认自动生成): ").strip()
-                if not output_file:
-                    output_file = None
-                
-                result = recorder.generate_json_config(point_mode, grid_size, output_file=output_file)
-                if result:
-                    print(f"\n后续步骤:")
-                    print(f"  1. 查看生成的 JSON 文件: {result}")
-                    print(f"  2. 运行命令生成 YAML:")
-                    print(f"     python3 nine_grid.py \\")
-                    print(f"       --input-json {result} \\")
-                    print(f"       --output-yaml nine_grid_points.yaml")
-            except ValueError:
-                print("❌ 输入格式错误")
-        
-        elif choice == "5":
-            print("\n退出程序")
-            break
-        
-        else:
-            print("❌ 选项无效，请输入 1-5")
+def _ask_confirm(prompt: str) -> bool:
+    ans = input(prompt).strip().lower()
+    return ans in ('y', 'yes')
+
+
+def _wait_pose_ready(recorder: LidarPoseRecorder, wait_sec: float) -> bool:
+    print("\n等待位姿消息...", end="", flush=True)
+    t0 = time.time()
+    while time.time() - t0 < wait_sec:
+        if recorder.current_pose is not None:
+            print(" ✓")
+            return True
+        time.sleep(0.05)
+    print(" ✗")
+    return False
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="固定 1-3-7 顺序的雷达位姿采点工具")
+    parser.add_argument("--topic", default="/aft_mapped_in_map", help="位姿订阅话题（例如 Odometry）")
+    parser.add_argument("--samples", type=int, default=6, help="每个点采样次数 n")
+    parser.add_argument("--interval", type=float, default=0.08, help="采样间隔（秒）")
+    parser.add_argument("--outlier-z", type=float, default=2.5, help="MAD 异常值剔除阈值")
+    parser.add_argument("--startup-timeout", type=float, default=5.0, help="等待首帧位姿超时（秒）")
+    parser.add_argument("--output", default="", help="输出 json 文件路径（默认自动命名）")
+    return parser.parse_args()
 
 
 def main():
+    args = _parse_args()
+    if args.samples < 3:
+        raise ValueError("--samples 必须 >= 3")
+    if args.interval <= 0.0:
+        raise ValueError("--interval 必须 > 0")
+    if args.outlier_z <= 0.0:
+        raise ValueError("--outlier-z 必须 > 0")
+
     rclpy.init()
-    recorder = LidarPoseRecorder()
+    recorder = LidarPoseRecorder(topic_name=args.topic)
     executor = SingleThreadedExecutor()
     executor.add_node(recorder)
     stop_event = threading.Event()
     ros_thread = None
-    
-    # 运行交互模式
+
     try:
-        # 在单独线程中运行可控执行器，便于安全退出
         def spin_loop():
             while rclpy.ok() and not stop_event.is_set():
                 executor.spin_once(timeout_sec=0.1)
 
         ros_thread = threading.Thread(target=spin_loop)
         ros_thread.start()
-        
-        # 等待第一个位姿消息
-        print("\n等待位姿消息...", end="", flush=True)
-        for _ in range(30):
-            if recorder.current_pose is not None:
-                print(" ✓")
-                break
-            time.sleep(0.1)
-        
-        if recorder.current_pose is None:
-            print("\n❌ 无法接收位姿消息，请确保 SLAM 系统正常运行")
+
+        if not _wait_pose_ready(recorder, wait_sec=float(args.startup_timeout)):
+            print("\n❌ 无法接收位姿消息，请检查话题与 SLAM 发布状态")
             return
-        
-        # 进入交互模式
-        interactive_mode(recorder)
-    
+
+        ordered_points = [1, 3, 7]
+        per_point_stats: Dict[int, Dict[str, object]] = {}
+
+        print("\n将按固定顺序采点: 1 -> 3 -> 7")
+        print(f"每点采样次数: {args.samples}, 采样间隔: {args.interval:.3f}s, 异常阈值: {args.outlier_z}")
+
+        for idx, point_id in enumerate(ordered_points, start=1):
+            print("\n" + "=" * 60)
+            print(f"[{idx}/3] 请将雷达移动到点 {point_id} 位置")
+            recorder.print_current_pose()
+
+            while True:
+                if not _ask_confirm(f"确认开始采集点 {point_id} ? (y/n): "):
+                    if _ask_confirm("放弃本次采集并退出? (y/n): "):
+                        print("已取消采集")
+                        return
+                    recorder.print_current_pose()
+                    continue
+                break
+
+            ok, averaged_xyz, stats = recorder.collect_point_average(
+                point_id=point_id,
+                sample_count=int(args.samples),
+                sample_interval_sec=float(args.interval),
+                outlier_z_thresh=float(args.outlier_z),
+            )
+            if not ok or averaged_xyz is None:
+                print(f"❌ 点 {point_id} 采样失败：{stats}")
+                return
+
+            per_point_stats[point_id] = stats
+            print(
+                f"✓ 点 {point_id} 完成: avg=[{averaged_xyz[0]:.6f}, {averaged_xyz[1]:.6f}, {averaged_xyz[2]:.6f}] "
+                f"(raw={stats['raw_count']}, kept={stats['kept_count']}, rejected={stats['rejected_count']})"
+            )
+
+            if not _ask_confirm(f"确认接受点 {point_id} 的采样结果? (y/n): "):
+                print(f"将重新采集点 {point_id}")
+                ok, averaged_xyz, stats = recorder.collect_point_average(
+                    point_id=point_id,
+                    sample_count=int(args.samples),
+                    sample_interval_sec=float(args.interval),
+                    outlier_z_thresh=float(args.outlier_z),
+                )
+                if not ok or averaged_xyz is None:
+                    print(f"❌ 点 {point_id} 重采样失败：{stats}")
+                    return
+                per_point_stats[point_id] = stats
+                print(
+                    f"✓ 点 {point_id} 重采完成: avg=[{averaged_xyz[0]:.6f}, {averaged_xyz[1]:.6f}, {averaged_xyz[2]:.6f}] "
+                    f"(raw={stats['raw_count']}, kept={stats['kept_count']}, rejected={stats['rejected_count']})"
+                )
+
+        output_file = args.output.strip() if args.output else None
+        saved = recorder.generate_json_config(
+            sample_count=int(args.samples),
+            sample_interval_sec=float(args.interval),
+            outlier_z_thresh=float(args.outlier_z),
+            per_point_stats=per_point_stats,
+            output_file=output_file,
+        )
+        if saved is None:
+            print("❌ JSON 生成失败")
+            return
+
+        print("\n采集完成。")
+        print(f"JSON 文件: {saved}")
+
     except KeyboardInterrupt:
         print("\n\n程序被中断")
     finally:

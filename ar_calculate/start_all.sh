@@ -3,7 +3,7 @@ set -euo pipefail
 
 # 项目路径配置
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MAIN_WORKSPACE="/home/r1/9_grid_ar_detection/FAST_LIVO2_ROS2_relocation_ultra"
+MAIN_WORKSPACE="/home/r1/9_grid_ar_detection/FAST_LIVO2_relocation_revise"
 AR_WORKSPACE="${SCRIPT_DIR}"
 LOG_DIR="${SCRIPT_DIR}/log/one_click"
 mkdir -p "${LOG_DIR}"
@@ -160,14 +160,9 @@ start_bg "livox_driver" "ros2 launch livox_ros_driver2 msg_MID360_launch.py"
 sleep 3
 echo "  ✓ Livox driver started"
 
-# 3. 启动 FAST-LIVO2 里程计 (带或不带重定位配置)
+# 3. 启动 FAST-LIVO2 里程计 为了补足后面会退出的重定位
 echo "[STEP 3/6] Starting FAST-LIVO2 odometry..."
 if [[ "${ENABLE_RELOCALIZATION}" == "1" ]]; then
-  # 使用重定位配置启动 FAST-LIVO2
-  # 注意：example_teaser_gicp.launch.py 会启动 FAST-LIVO2
-  echo "  Note: FAST-LIVO2 will be started by relocalization launch file"
-else
-  # 纯建图模式
   start_bg "fast_livo" "ros2 launch fast_livo mapping_avia.launch.py use_rviz:=True"
   sleep 5
   echo "  ✓ FAST-LIVO2 started (mapping mode)"
@@ -219,7 +214,7 @@ sleep 3
 # 显示关键话题状态
 echo ""
 echo "Key topics status:"
-for topic in "/livox/lidar" "/livox/imu" "/aft_mapped_to_init" "/fisheye_camera/image_raw" "/ar_grid/image" "/ar_grid/visible_cells"; do
+for topic in "/livox/lidar" "/livox/imu" "/aft_mapped_in_map" "/fisheye_camera/image_raw" "/ar_grid/image" "/ar_grid/visible_cells"; do
   if ros2 topic list 2>/dev/null | grep -qx "${topic}"; then
     echo "  ✓ ${topic}"
   else
@@ -236,7 +231,7 @@ echo "Tips:"
 echo "  • View logs in: ${LOG_DIR}/"
 echo "  • View topics: ros2 topic list"
 echo "  • View transforms: ros2 run tf2_tools view_frames"
-echo "  • Monitor odometry: ros2 topic echo /aft_mapped_to_init"
+echo "  • Monitor odometry: ros2 topic echo /aft_mapped_in_map"
 if [[ "${ENABLE_AR_DETECTOR}" == "1" ]]; then
   echo "  • View AR image: ros2 run rqt_image_view rqt_image_view /ar_grid/image"
   echo "  • View visible cells: ros2 topic echo /ar_grid/visible_cells"

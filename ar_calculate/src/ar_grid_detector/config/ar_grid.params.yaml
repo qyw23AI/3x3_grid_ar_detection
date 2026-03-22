@@ -1,6 +1,6 @@
 /**:
   ros__parameters:
-    odom_topic: "/aft_mapped_to_init"
+    odom_topic: "/aft_mapped_in_map"
     image_topic: "/camera/camera/color/image_raw"
     output_image_topic: "/ar_grid/image"
     visible_cells_topic: "/ar_grid/visible_cells"
@@ -36,17 +36,17 @@
       cols: 3
 
       # 仅用于可选一致性校验；格子几何由三个角点决定（单位：米）
-      cell_width: 0.05
-      cell_height: 0.05
+      cell_width: 0.03
+      cell_height: 0.03
       strict_size_check: false
       size_tolerance: 0.0001
 
       # 三个角点坐标单位：米（x, y, z）
       # 如果 input_is_cell_centers=true，这三个坐标是格子中心位置
       # 如果 input_is_cell_centers=false，这三个坐标是格子架的外角点位置
-      corner_top_left: [-0.081696, 0.925071, 0.370132]
-      corner_top_right: [0.128394, 0.702569, 0.372652]
-      corner_bottom_left: [-0.158594, 0.849270, 0.083796]
+      corner_top_left: [1.671702, -0.640819, 0.688713]
+      corner_top_right: [1.470960, -1.178978, 0.678743]
+      corner_bottom_left: [1.676878, -0.607198, 0.095880]
 
       # 重要：用户采集的坐标通常是"站在格子中心位置"的位姿
       # 设为 true 时会自动将格子中心坐标转换为角点坐标
@@ -63,6 +63,7 @@
       show_status_text: true
       show_window: true
       window_name: "AR Grid Overlay"
+
 
     extrinsic_rpy_xyz: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     # 与 ar_overlay_node 保持一致的外参矩阵

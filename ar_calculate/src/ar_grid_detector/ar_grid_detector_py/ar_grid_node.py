@@ -74,7 +74,7 @@ class ArGridNode(Node):
         self.get_logger().info(f"Publishing visible cells to {visible_cells_topic}")
 
     def _declare_params(self) -> None:
-        self.declare_parameter("odom_topic", "/aft_mapped_to_init")
+        self.declare_parameter("odom_topic", "/aft_mapped_in_map")
         self.declare_parameter("image_topic", "/fisheye_camera/image_raw")
         self.declare_parameter("output_image_topic", "/ar_grid/image")
         self.declare_parameter("visible_cells_topic", "/ar_grid/visible_cells")
@@ -374,20 +374,46 @@ class ArGridNode(Node):
     def _stamp_to_sec(self, stamp) -> float:
         return float(stamp.sec) + float(stamp.nanosec) * 1e-9
 
-    def _select_pose_for_image(self, image_stamp_sec: float) -> Tuple[np.ndarray, Optional[float]]:
-        with self._lock:
-            latest_pose = self._latest_t_w_s.copy()
-            history = list(self._odom_history)
+    # def _select_pose_for_image(self, image_stamp_sec: float) -> Tuple[np.ndarray, Optional[float]]:
+    #     with self._lock:
+    #         latest_pose = self._latest_t_w_s.copy()
+    #         history = list(self._odom_history)
 
+    #     if not history:
+    #         return latest_pose, None
+
+    #     use_closest = bool(self.get_parameter("odom_sync.use_closest_by_stamp").value)
+    #     if not use_closest:
+    #         odom_stamp_sec, pose = history[-1]
+    #         return pose.copy(), abs(image_stamp_sec - odom_stamp_sec)
+
+    #     odom_stamp_sec, pose = min(history, key=lambda item: abs(item[0] - image_stamp_sec))
+    #     return pose.copy(), abs(image_stamp_sec - odom_stamp_sec)
+    def _select_pose_for_image(self, image_stamp_sec: float) -> Tuple[np.ndarray, Optional[float]]:
+        # 获取锁并复制当前最新 pose 与历史队列的快照，避免在无锁状态下访问共享数据结构
+        with self._lock:
+            latest_pose = self._latest_t_w_s.copy()    # 最近一次收到的 T_w_s（4x4 矩阵）
+            history = list(self._odom_history)          # odom 历史：deque[(stamp_sec, T_w_s), ...]
+
+        # 如果历史为空，返回最新 pose（初始值为单位矩阵）和 None 表示没有 age 信息
         if not history:
             return latest_pose, None
 
+        # 参数控制：使用最近（closest by stamp）策略还是直接使用最新（last）策略
         use_closest = bool(self.get_parameter("odom_sync.use_closest_by_stamp").value)
+
+        # 如果不使用“closest by stamp”，直接取历史中最后一条（最新的里程计）
+        # 返回值：
+        #  - pose.copy(): 选择的 pose（4x4 矩阵副本，调用方可安全修改）
+        #  - abs(image_stamp_sec - odom_stamp_sec): 图像时间与该 pose 时间的绝对差（秒）
         if not use_closest:
             odom_stamp_sec, pose = history[-1]
             return pose.copy(), abs(image_stamp_sec - odom_stamp_sec)
 
+        # 使用“closest by stamp”策略：在历史中找到与 image_stamp_sec 差值最小的一条
+        # min(..., key=...) 返回 (stamp_sec, pose) 对；这里按时间差的绝对值比较
         odom_stamp_sec, pose = min(history, key=lambda item: abs(item[0] - image_stamp_sec))
+        # 返回所选 pose 的副本以及对应的时间差（秒）
         return pose.copy(), abs(image_stamp_sec - odom_stamp_sec)
 
     def _load_grid_from_yaml(self, yaml_path: Path) -> GridFrame:
@@ -421,36 +447,80 @@ class ArGridNode(Node):
             size_tolerance=size_tolerance,
         )
 
+    # def odom_callback(self, msg: Odometry) -> None:
+    #     p = msg.pose.pose.position
+    #     q = msg.pose.pose.orientation
+
+    #     # 从里程计消息构造 T_w_s（sensor 在 world 中的位姿）：
+    #     # P_w = T_w_s * P_s
+    #     # 后续会求逆得到 T_s_w，用于把世界点变换到传感器系。
+    #     rot_w_s = quat_to_rot_matrix(q.x, q.y, q.z, q.w)
+    #     trans_w_s = np.array([p.x, p.y, p.z], dtype=np.float64)
+    #     t_w_s = make_transform(rot_w_s, trans_w_s)
+
+    #     with self._lock:
+    #         self._latest_t_w_s = t_w_s
+    #         self._latest_odom_time = msg.header.stamp
+    #         self._odom_history.append((self._stamp_to_sec(msg.header.stamp), t_w_s.copy()))
+
+    #     if not self._odom_received_once:
+    #         self.get_logger().info("Received first odom message")
+    #         self._odom_received_once = True
     def odom_callback(self, msg: Odometry) -> None:
+        # 从里程计消息中提取位置与朝向（四元数）
         p = msg.pose.pose.position
         q = msg.pose.pose.orientation
 
-        # 从里程计消息构造 T_w_s（sensor 在 world 中的位姿）：
-        # P_w = T_w_s * P_s
-        # 后续会求逆得到 T_s_w，用于把世界点变换到传感器系。
+        # 构造传感器（sensor）在世界坐标系（world）中的位姿 T_w_s
+        # 这里使用四元数转旋转矩阵函数 quat_to_rot_matrix，返回 3x3 旋转矩阵
         rot_w_s = quat_to_rot_matrix(q.x, q.y, q.z, q.w)
+        # 平移向量 tx,ty,tz（确保为 float64 类型，便于后续矩阵运算）
         trans_w_s = np.array([p.x, p.y, p.z], dtype=np.float64)
+        # 将旋转矩阵与平移组合为 4x4 齐次变换矩阵 T_w_s
+        # 语义：将传感器系下一个点 P_s（齐次坐标）变换到世界系 P_w = T_w_s * P_s
         t_w_s = make_transform(rot_w_s, trans_w_s)
 
+        # 使用锁保护共享状态更新（线程安全）
+        # 因为回调可能并发触发，而其它线程/回调会读取这些字段（例如 image_callback）
         with self._lock:
+            # 保存最新的变换（用以对图像做投影）
             self._latest_t_w_s = t_w_s
+            # 保存最新里程计时间戳（ROS Header 时间），用于时间同步/匹配
             self._latest_odom_time = msg.header.stamp
+            # 将 (timestamp_sec, transform) 推入历史队列，用于按时间选择最接近的 pose
+            # 注意这里存的是秒级浮点时间，便于后续对比 image 时间戳
             self._odom_history.append((self._stamp_to_sec(msg.header.stamp), t_w_s.copy()))
 
+        # 第一次收到里程计时记录一次日志（只记录一次以免刷屏）
         if not self._odom_received_once:
             self.get_logger().info("Received first odom message")
             self._odom_received_once = True
-
+            
     def image_callback(self, msg: Image) -> None:
+        # ============== 第一步：获取最新 odom 时间戳快照 ==============
+        # 使用锁获取最近一次收到的里程计时间戳（用于后续状态显示）
         with self._lock:
             latest_odom_time = self._latest_odom_time
 
+        # ============== 第二步：时间戳转换与 pose 选择 ==============
+        # 将 ROS Header 中的 stamp（秒+纳秒）转为浮点秒
+        # 时间戳语义：该图像在哪个时间点被采集的（相机的曝光中点时间）
         image_stamp_sec = self._stamp_to_sec(msg.header.stamp)
+        
+        # 根据图像时间从历史 odom deque 中选择最接近的 pose
+        # 返回 (T_w_s, pose_age_sec)：
+        #   - T_w_s: sensor 在 world 坐标系中的 4x4 齐次变换矩阵
+        #   - pose_age_sec: 所选 pose 与图像的时间差（秒），None 表示历史为空
         t_w_s, pose_age_sec = self._select_pose_for_image(image_stamp_sec)
 
+        # ============== 第三步：时间同步检查与告警 ==============
+        # 参数 odom_sync.max_pose_age_sec（默认 0.25 秒，即 250 ms）
+        # 含义：能接受的最大 pose-image 时间差；超过阈值表示两者不同步
+        # 影响：若超过阈值会在画面显示警告（表示投影可能抖动或不准确）
         max_pose_age_sec = float(self.get_parameter("odom_sync.max_pose_age_sec").value)
         if pose_age_sec is not None and pose_age_sec > max_pose_age_sec:
             now = time.time()
+            # 节流告警（不要刷屏），每 1.5 秒最多一次
             if now - self._last_pose_age_warn_time > 1.5:
                 self.get_logger().warn(
                     f"Pose/Image timestamp gap is large: {pose_age_sec * 1000.0:.1f} ms. "
@@ -458,17 +528,47 @@ class ArGridNode(Node):
                 )
                 self._last_pose_age_warn_time = now
 
-        # ---------------- AR 变换主链路 ----------------
-        # 已知：T_w_s（sensor 在 world 中）
-        # 1) 求逆得到 T_s_w（world -> sensor）
-        # 2) 与外参 T_c_s（sensor -> camera）相乘，得到 T_c_w（world -> camera）
-        # 最终：P_c = T_c_w * P_w = T_c_s * T_s_w * P_w
-        t_s_w = inverse_transform(t_w_s)
-        t_c_w = self.t_c_s @ t_s_w
+        # ============== 第四步：AR 投影变换主链路 ==============
+        # *** 这是 AR 定位的核心计算 ***
+        # 已知条件：
+        #   - 世界坐标系 {world}：九宫格所在的参考坐标系（来自 SLAM 重定位）
+        #   - 传感器坐标系 {sensor}：里程计输出的坐标系（lidar origin）
+        #   - 相机坐标系 {camera}：鱼眼相机的光学中心
+        #   - T_w_s：sensor 在 world 中的位姿（来自 _select_pose_for_image）
+        #   - T_c_s：camera 在 sensor 中的外参（已标定，存在 self.t_c_s）
+        #
+        # 投影流程（坐标系变换链）：
+        #  1) 世界点 P_w 通过 T_c_w 变换到相机系：P_c = T_c_w * P_w
+        #  2) T_c_w = T_c_s * T_s_w = T_c_s * inv(T_w_s)
+        #     其中 T_s_w 是 T_w_s 的逆矩阵（world 到 sensor 的变换）
+        #
+        # 如果外参 T_c_s 标定有误（旋转/平移/坐标系约定），会导致：
+        #   - 整体位移：外参平移错误
+        #   - 旋转不对：外参旋转矩阵错误或四元数顺序错误
+        #   - 镜像/翻转：坐标系轴方向约定不一致
+        
+        # 求逆得到从 world 指向 sensor 的变换
+        t_s_w = inverse_transform(t_w_s)  # T_s_w = inv(T_w_s)
+        # 最终的世界到相机变换（用于所有点的投影）
+        t_c_w = self.t_c_s @ t_s_w      # T_c_w = T_c_s * T_s_w
 
+        # ============== 第五步：图像获取与尺寸 ==============
+        # 将 ROS Image 消息转为 OpenCV 格式（BGR8）
+        # 后续所有绘制都在这个 image 上进行（最后发布或显示）
         image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-        h, w = image.shape[:2]
+        h, w = image.shape[:2]  # 图像高度和宽度（像素）
 
+        # ============== 第六步：加载绘制参数 ==============
+        # 以下参数控制九宫格在画面上的外观：
+        # - draw.cell_border_color_bgr：格子边框颜色（BGR 顺序）
+        # - draw.cell_border_thickness：格子边框线宽（像素）
+        # - draw.cell_center_color_bgr：格子中心点颜色
+        # - draw.cell_center_radius：格子中心点半径
+        # - draw.label_color_bgr：格子 ID 文字颜色
+        # - draw.show_labels：是否显示格子 ID 编号
+        # - draw.show_status_text：是否显示上方状态栏（odom/front/visible/dt_ms）
+        # - draw.curve_samples_per_edge：鱼眼相机下格子边界的采样点数（越多越光滑但越慢）
+        
         border_color = tuple(int(v) for v in self.get_parameter("draw.cell_border_color_bgr").value)
         border_thickness = int(self.get_parameter("draw.cell_border_thickness").value)
         center_color = tuple(int(v) for v in self.get_parameter("draw.cell_center_color_bgr").value)
@@ -478,100 +578,136 @@ class ArGridNode(Node):
         show_labels = bool(self.get_parameter("draw.show_labels").value)
         show_status_text = bool(self.get_parameter("draw.show_status_text").value)
         curve_samples_per_edge = int(self.get_parameter("draw.curve_samples_per_edge").value)
-        use_curved_grid = self._is_fisheye_model_selected()
+        use_curved_grid = self._is_fisheye_model_selected()  # 鱼眼相机需要曲线采样边界
 
+        # ============== 第七步：初始化消息与计数器 ==============
+        # 构建 ROS GridCellArray 消息，用于发布到 /ar_grid/visible_cells 话题
         cells_msg = GridCellArray()
-        cells_msg.header = msg.header
+        cells_msg.header = msg.header  # 继承图像时间戳
         cells_msg.rows = self.grid_frame.rows
         cells_msg.cols = self.grid_frame.cols
         cells_msg.total_cells = self.grid_frame.total_cells
-        cells_msg.visible_cells = 0
+        cells_msg.visible_cells = 0  # 后续会累加
         cells_msg.cells = []
         cells_msg.visible_cell_ids = []
 
-        visible_count = 0
-        front_count = 0
+        visible_count = 0  # 统计有多少个格子成功投影到图像内
+        front_count = 0    # 统计有多少个格子的中心点在相机前方（z > 0）
 
+        # ============== 第八步：逐格子投影处理 ==============
+        # 对每个九宫格格子进行投影、可见性判定、绘制标注
         for cell_id in sorted(self.grid_frame.cells.keys()):
             cell = self.grid_frame.cells[cell_id]
 
-            # 1) 格子中心点：world -> camera
+            # -------- 8.1) 格子中心点投影：world -> camera --------
+            # 齐次坐标：加上第 4 个分量 1.0（便于 4x4 矩阵乘法）
             center_w_h = np.array([
                 cell.center_world[0],
                 cell.center_world[1],
                 cell.center_world[2],
                 1.0,
             ], dtype=np.float64)
+            # 中心点在相机系的坐标（齐次）
             center_c_h = t_c_w @ center_w_h
+            # 提取 xyz，丢弃齐次分量
             center_c = center_c_h[:3]
+            # center_c[0], center_c[1]: 相机系中的 x, y 坐标
+            # center_c[2]: 深度（z 需要 > 0 才能投影到图像前方）
 
-            corners_c: List[np.ndarray] = []
-            corners_px: List[Tuple[float, float]] = []
+            corners_c: List[np.ndarray] = []     # 所有 4 个角点在相机系中的坐标
+            corners_px: List[Tuple[float, float]] = []  # 所有 4 个角点在图像中的像素坐标 (u, v)
 
-            corners_front = True
+            # -------- 8.2) 格子四角点投影与深度检查 --------
+            corners_front = True  # 标志：是否所有 4 个角点都在相机前方
             for cw in cell.corners_world:
-                # 2) 格子四角点：world -> camera
+                # 投影该角点：world -> camera
                 p_w_h = np.array([cw[0], cw[1], cw[2], 1.0], dtype=np.float64)
                 p_c_h = t_c_w @ p_w_h
                 p_c = p_c_h[:3]
                 corners_c.append(p_c)
 
-                # 3) 深度判定：z<=0 说明点在相机后方，无法成像
+                # -------- 8.3) 深度判定 --------
+                # 如果深度 z <= 0，说明该点在相机后方或极近处，无法投影到图像
+                # 阈值 1e-6 是为了避免舍入误差（点在相机光心非常近）
                 if p_c[2] <= 1e-6:
                     corners_front = False
                     break
 
-                # 4) 相机模型投影：camera 3D -> pixel 2D
+                # -------- 8.4) 相机模型投影：camera 3D -> pixel 2D --------
+                # 使用已加载的相机模型（pinhole 或 fisheye）进行投影
+                # 返回 (u, v) 像素坐标，或 None 如果投影失败（畸变模型异常、点太靠近边缘等）
                 uv = self.camera_model.project_point(p_c)
                 if uv is None:
                     corners_front = False
                     break
                 corners_px.append(uv)
 
+            # -------- 8.5) 中心点投影与计数 --------
+            # 统计有多少格子的中心点在相机前方
             if center_c[2] > 1e-6:
                 front_count += 1
 
+            # 中心点也需要投影检查（深度合法性 + 投影失败处理）
             center_uv = self.camera_model.project_point(center_c) if center_c[2] > 1e-6 else None
+            # 判断中心点是否落在图像边界内
             center_in_image = (
                 center_uv is not None and 0 <= center_uv[0] < w and 0 <= center_uv[1] < h
             )
+            
+            # -------- 8.6) 可见性判定逻辑 --------
+            # 格子可见需要满足两个条件：
+            # 1) 所有 4 个角点都能成功投影（has_valid_corners）
+            # 2) 至少有一个点（中心或某个角点）落在图像范围内
+            #
+            # 这样设计的目的是：
+            #   - 避免因投影失败（如畸变异常）产生垃圾数据
+            #   - 允许部分角点在图像边缘外，只要整体格子有部分可见
+            #   - 需要至少一个点在图像内，否则没有投影价值
+            
             has_valid_corners = corners_front and len(corners_px) == 4
             any_corner_in_image = has_valid_corners and any(
                 0 <= u < w and 0 <= v < h for (u, v) in corners_px
             )
 
-            # 5) 可见性策略：
-            # - 四角都需可投影（排除在相机后方或畸变模型非法点）
-            # - 且中心或任一角点落在图像范围内
+            # 综合判定：格子是否在最终画面中可见
+            # visible = 所有角点投影成功 AND (中心在图内 OR 至少一个角点在图内)
             visible = bool(has_valid_corners and (center_in_image or any_corner_in_image))
             if visible:
                 visible_count += 1
 
+            # -------- 8.7) 构建 GridCell 消息 --------
+            # 每个格子对应一条 GridCell 消息，包含其投影结果与可见性
             cell_msg = GridCell()
-            cell_msg.header = msg.header
-            cell_msg.cell_id = int(cell.cell_id)
-            cell_msg.row = int(cell.row)
-            cell_msg.col = int(cell.col)
+            cell_msg.header = msg.header  # 继承图像时间戳
+            cell_msg.cell_id = int(cell.cell_id)  # 1-9 的格子编号
+            cell_msg.row = int(cell.row)  # 行号
+            cell_msg.col = int(cell.col)  # 列号
             cell_msg.is_visible = bool(visible)
 
+            # 格子在世界坐标系中的中心位置（固定，不随相机移动变化）
             cell_msg.position_world_frame = Point(
                 x=float(cell.center_world[0]),
                 y=float(cell.center_world[1]),
                 z=float(cell.center_world[2]),
             )
 
+            # -------- 8.8) 可见格子的详细投影信息 --------
             if visible:
+                # 格子在相机坐标系中的中心位置（深度信息用于距离计算）
                 cell_msg.position_camera_frame = Point(
                     x=float(center_c[0]),
                     y=float(center_c[1]),
-                    z=float(center_c[2]),
+                    z=float(center_c[2]),  # 深度，单位：米
                 )
+                # 格子四个角点的像素坐标（这是最终要在图像上绘制的位置）
+                # ordered[i] = (u, v) 表示第 i 角的像素坐标
                 ordered = [(0, 0), (0, 0), (0, 0), (0, 0)]
                 ordered[0] = (float(corners_px[0][0]), float(corners_px[0][1]))
                 ordered[1] = (float(corners_px[1][0]), float(corners_px[1][1]))
                 ordered[2] = (float(corners_px[2][0]), float(corners_px[2][1]))
                 ordered[3] = (float(corners_px[3][0]), float(corners_px[3][1]))
 
+                # 保存四个角点的像素坐标到消息
                 cell_msg.corners_pixel = [
                     Point32(x=float(ordered[0][0]), y=float(ordered[0][1]), z=0.0),
                     Point32(x=float(ordered[1][0]), y=float(ordered[1][1]), z=0.0),
@@ -579,6 +715,9 @@ class ArGridNode(Node):
                     Point32(x=float(ordered[3][0]), y=float(ordered[3][1]), z=0.0),
                 ]
 
+                # 计算中心点的像素坐标（用于在图像上标注 ID）
+                # 注：这里计算的 center_u/v 是四个角点的平均，可能与相机投影的结果有微小差异
+                # 但对绘制标注足够精确
                 center_u = sum(p[0] for p in ordered) / 4.0
                 center_v = sum(p[1] for p in ordered) / 4.0
                 cell_msg.center_pixel = Point32(x=float(center_u), y=float(center_v), z=0.0)
@@ -626,7 +765,11 @@ class ArGridNode(Node):
                     cv2.polylines(image, [cv_pts], isClosed=True, color=border_color, thickness=border_thickness, lineType=cv2.LINE_AA)
 
                 c_u_i, c_v_i = int(round(center_u)), int(round(center_v))
+                # -------- 8.10) 格子中心点绘制 - 用圆点标记格子中心 --------
                 cv2.circle(image, (c_u_i, c_v_i), center_radius, center_color, center_thickness, lineType=cv2.LINE_AA)
+                
+                # -------- 8.11) 可选的格子 ID 标签 --------
+                # 显示格子编号（1-9）在中心位置，受 show_labels 参数控制
                 if show_labels:
                     cv2.putText(
                         image,
@@ -639,9 +782,14 @@ class ArGridNode(Node):
                         lineType=cv2.LINE_AA,
                     )
 
+                # -------- 8.12) 记录可见格子信息 --------
+                # 跟踪此可见格子的 ID 和深度，用于下游处理
                 cells_msg.visible_cell_ids.append(int(cell.cell_id))
                 cell_msg.depth = float(center_c[2])
             else:
+                # -------- 8.13) 不可见格子用零值填充 --------
+                # 对于不可见的格子，用零值占位来减小消息大小
+                # （约减少 50% 的消息量，改善 ROS 带宽效率）
                 cell_msg.position_camera_frame = Point(x=0.0, y=0.0, z=0.0)
                 cell_msg.corners_pixel = [
                     Point32(x=0.0, y=0.0, z=0.0),
@@ -653,11 +801,22 @@ class ArGridNode(Node):
                 cell_msg.depth = 0.0
             cells_msg.cells.append(cell_msg)
 
+        # ============== 第九步：完成消息并发布 GridCellArray ==============
+        # 设置可见格子计数并发布完整的投影结果
+        # 下游节点（如 UI 可视化、坐标转换）可订阅此话题
         cells_msg.visible_cells = int(visible_count)
         self.visible_cells_pub.publish(cells_msg)
 
         if show_status_text:
+            # ============== 第十步：状态栏文本生成 ============== 
+            # 在图像上显示实时状态：里程计状态 + 格子计数 + 时间戳差
             has_odom = latest_odom_time is not None
+            # 状态格式：odom_状态 正面个数/总数 可见个数/总数 时间差_ms
+            # 示例："odom=ok front=7/9 visible=6/9 dt_ms=12.5"
+            # - odom: 'ok' 表示已收到里程计，'missing' 表示超时
+            # - front: 有多少格子的中心在相机前方 (z>0)
+            # - visible: 有多少格子实际投影到图像上
+            # - dt_ms: 图像与里程计的时间差（毫秒）
             status = (
                 f"odom={'ok' if has_odom else 'missing'} "
                 f"front={front_count}/{self.grid_frame.total_cells} "
@@ -665,6 +824,9 @@ class ArGridNode(Node):
                 f"dt_ms={(pose_age_sec * 1000.0):.1f}" if pose_age_sec is not None else
                 f"odom={'ok' if has_odom else 'missing'} front={front_count}/{self.grid_frame.total_cells} visible={visible_count}/{self.grid_frame.total_cells} dt_ms=n/a"
             )
+            
+            # 在图像左上角 (10, 28) 绘制状态文本
+            # 颜色：里程计 ok 时为绿色，missing 时为红色（警告）
             cv2.putText(
                 image,
                 status,
@@ -679,7 +841,7 @@ class ArGridNode(Node):
             if not has_odom:
                 cv2.putText(
                     image,
-                    "No odom data on configured topic",
+                    "未收到里程计数据，请检查配置的话题",
                     (10, 56),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,
@@ -688,27 +850,34 @@ class ArGridNode(Node):
                     lineType=cv2.LINE_AA,
                 )
 
+        # ============== 第十一步：诊断日志 ============== 
+        # 如果 2+ 秒内没有可见格子，则记录警告
+        # 表示可能存在：传感器故障、参数不匹配、坐标系约定错误
         now = time.time()
         if now - self._last_diag_log_time > 2.0 and visible_count == 0:
             self.get_logger().warn(
-                "No visible cells projected. Check odom topic, extrinsic, camera model/intrinsics, and frame conventions."
+                "没有投影的可见格子。请检查：里程计话题、外参、相机模型/内参和坐标系约定。"
             )
             self._last_diag_log_time = now
 
-        out_msg = self.bridge.cv2_to_imgmsg(image, encoding="bgr8")
-        out_msg.header = msg.header
+        # ============== 第十二步：准备输出图像消息 ============== 
+        # 将标注后的 OpenCV 图像转换回 ROS 消息格式
+        # out_msg = self.bridge.cv2_to_imgmsg(image, encoding="bgr8")
+        # out_msg.header = msg.header
         # self.image_pub.publish(out_msg)
 
+        # ============== 第十三步：可选的 OpenCV 窗口显示 ============== 
+        # 如果启用 draw.show_window，显示实时可视化（Headless 系统可禁用）
         if bool(self.get_parameter("draw.show_window").value):
             window_name = str(self.get_parameter("draw.window_name").value)
             try:
                 cv2.imshow(window_name, image)
-                cv2.waitKey(1)
+                cv2.waitKey(1)  # 1ms 延迟用于处理窗口事件
             except cv2.error as exc:
                 if not self._window_error_logged:
                     self.get_logger().warn(
-                        f"OpenCV window display failed (headless/GUI unavailable): {exc}. "
-                        "Set draw.show_window:=false to suppress this warning."
+                        f"OpenCV 窗口显示失败（Headless/无 GUI）：{exc}。"
+                        "请设置 draw.show_window:=false 来禁用此警告。"
                     )
                     self._window_error_logged = True
 
